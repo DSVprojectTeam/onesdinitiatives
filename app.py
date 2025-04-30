@@ -13,6 +13,7 @@ import binascii
 app_info = {'db_file' : 'data/database.db'}
 
 app = Flask(__name__)
+
 load_dotenv()
 app.secret_key = os.getenv('SECRET_KEY')
 
@@ -61,7 +62,6 @@ class UserPass:
         self.password = random_password
 
     def login_user(self):
-
         db = get_db()
         sql_statement = 'select id, name, email, password, is_active, is_admin from users where name=?'
         cur = db.execute(sql_statement, [self.user])
@@ -413,15 +413,22 @@ def export_initiatives():
     initiatives = cur.fetchall()
 
     df = pd.DataFrame([dict(row) for row in initiatives])
+    
     output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Initiatives')
+    csv_data = df.to_csv(index=False, sep=';', encoding='utf-8-sig')
+    output.write(csv_data.encode('utf-8-sig'))
     output.seek(0)
 
     now = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"initiatives_{now}.xlsx"
+    filename = f"initiatives_{now}.csv"
 
-    return send_file(output, as_attachment=True, download_name=filename, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype='text/csv'
+    )
+
 
 if __name__ == '__main__':
     app.run(debug=True)
