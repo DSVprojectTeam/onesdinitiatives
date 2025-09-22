@@ -1,49 +1,55 @@
 {% extends "base.html" %}
+{% block body_content %} 
 
-{% block title %}About the Project{% endblock %}
-
-{% block content %}
-<div class="max-w-3xl mx-auto py-10 px-4">
-    <h1 class="text-3xl font-bold text-center mb-6">DSV Service Desk Initiatives</h1>
-
-    <p class="text-gray-700 text-lg mb-6">
-        This web app was created to gather and track all initiatives handled within the DSV Service Desk team.
-        Here you can browse ongoing projects, monitor progress, and stay aligned with what's happening.
+<div class="container">
+    <h1 class="text-center">DSV Service Desk Schedule</h1>
+    <p class="lh-3 small">
+        The ShiftPlan page is designed to streamline and organize the scheduling needs of our Service Desk team. 
+        It provides a clear, real-time overview of team shifts, ensuring optimal coverage and efficient resource 
+        allocation to meet service demands.
     </p>
-
-    <p class="text-gray-700 mb-4">
-        If you need an account, forgot your password, or need to remove initiative — please contact one of the administrators listed below.
-    </p>
-
-    <div class="bg-gray-100 p-4 rounded-lg shadow-sm mb-6">
-        <h2 class="text-xl font-semibold mb-4">Admins & Editors</h2>
-        <div class="overflow-x-auto">
-            <table class="min-w-full table-auto border border-gray-300 text-left text-sm">
-                <thead class="bg-gray-200 text-gray-700">
-                    <tr>
-                        <th class="px-4 py-2 border">Admin</th>
-                        <th class="px-4 py-2 border">Editor</th>
-                    </tr>
-                </thead>
-                <tbody class="text-gray-800">
-                    <tr class="hover:bg-gray-50">
-                        <td class="px-4 py-2 border">Rafał Kowalik</td>
-                        <td class="px-4 py-2 border">—</td>
-                    </tr>
-                    <tr class="hover:bg-gray-50">
-                        <td class="px-4 py-2 border">Michał Grysiński</td>
-                        <td class="px-4 py-2 border">—</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-    </div>    
-    <p class="text-sm text-gray-500 text-center">
-        Release version 1.0.1 Date 18.04.2025
-    </p><br>
-    <div class="bg-gray-900 text-gray-100 p-4 rounded-md shadow-md font-mono text-sm whitespace-pre">
-        <code>{{ readme }}</code>
-        </div>
-
 </div>
+
+<div class="container bg-light border rounded p-3 my-4">
+    <h2 class="h4">Admins &amp; Editors</h2>
+    <table class="table table-light table-bordered table-sm small">
+        <thead>
+            <tr class="table-secondary">
+                <th>Admin</th>
+                <th>Editor</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Rafał Kowalik</td>
+                <td>Jakub Kryspin</td>
+            </tr>
+            <tr>
+                <td>Michał Grysiński</td>
+                <td>Konrad Brewiński</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<div id="changelog" class="container bg-light border rounded my-4 p-3 small" style="max-height: 460px; overflow-y: auto;">
+    <p>Loading changelog...</p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+<script>
+    const changelogUrl = "https://raw.githubusercontent.com/DSVprojectTeam/shshiftplan/main/CHANGELOG.md";
+
+    fetch(changelogUrl)
+        .then(res => res.text())
+        .then(markdown => {
+            document.getElementById("changelog").innerHTML = marked.parse(markdown);
+        })
+        .catch(err => {
+            document.getElementById("changelog").innerText = "Błąd podczas pobierania changeloga.";
+            console.error(err);
+        });
+</script>
+
 {% endblock %}

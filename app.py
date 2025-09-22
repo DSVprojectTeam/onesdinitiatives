@@ -1,434 +1,355 @@
-from flask import Flask, render_template, request, g, redirect, session, url_for, flash, send_file
-import os
-from dotenv import load_dotenv
-from datetime import datetime
+from flask import Flask, render_template, request, send_file, jsonify
 import pandas as pd
-from io import BytesIO
-import sqlite3
-import random
-import string
-import hashlib
-import binascii
-
-app_info = {'db_file' : 'data/database.db'}
+from datetime import datetime, timedelta
+from calendar import monthrange
+import io
+import warnings
 
 app = Flask(__name__)
 
-load_dotenv()
-app.secret_key = os.getenv('SECRET_KEY')
+SCHEDULE_FILE_PATH = 'schedule.xlsx'
+SKILL_MATRIX_PATH = 'skill_matrix.xlsx'
 
-def get_db():
-    if not hasattr(g, 'sqlite_db'):
-        conn = sqlite3.connect(app_info['db_file'])
-        conn.row_factory = sqlite3.Row
-        g.sqlite_db = conn
-    return g.sqlite_db
+ALL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+              'July', 'August', 'September', 'October', 'November', 'December']
 
-@app.teardown_appcontext
-def close_db(error):
-    if hasattr(g, 'sqlite_db'):
-        g.sqlite_db.close()
+DEFAULT_SCHEDULE_COLS = ["A,C,D,E:AI", "A,C,D,E:AH", "A,C,D,E:AG", "A,C,D,E:AF"]
+DEFAULT_DOWNLOAD_COLS = ["A,D,E:AI", "A,D,E:AH", "A,D,E:AG", "A,D,E:AF"]
 
-class UserPass:
+SHIFT_NAME_MAPPING = {
+    "EM_O": "EMEA Offline", "AP_O": "APAC Offline", "AM_O": "AMER Offline",
+    "EM_C": "EMEA Chat", "AP_C": "APAC Chat", "AM_C": "AMER Chat",
+    "EM_P": "EMEA Phone", "AP_P": "APAC Phone", "AM_P": "AMER Phone",
+    "AP_W": "APAC Weekender", "EM_W": "EMEA Weekender", "AM_W": "AMER Weekender",
+    "RD": "Rest Day", "PH": "Public Holiday", "EL": "Emergency Leave",
+    "SL": "Sickness", "VL": "Vacation", "SP": "Special Projects",
+    "KCS": "KCS Task", "KDE": "KDE Task", "ML": "Maternity Leave",
+    "PL": "Paternity Leave", "BA": "Buddy Agent Task", "BD": "Blood donation",
+    "M": "Meeting", "TR": "Training", "RB": "Recuperation of Bank Holiday",
+    "O": "Occasional Holiday", "OS": "Child care sickness leave", "DD": "Day on Demand"
+}
 
-    def __init__(self, user='', password=''):
-        self.user = user
-        self.password = password
-        self.email = ''
-        self.is_valid = False
-        self.is_admin = False
-
-    def hash_password(self):
-        os_urandom_static = b"ID_\x12p:\x8d\xe7&\xcb\xf0=H1\xc1\x16\xac\xe5BX\xd7\xd6j\xe3i\x11\xbe\xaa\x05\xccc\xc2\xe8K\xcf\xf1\xac\x9bFy(\xfbn.`\xe9\xcd\xdd'\xdf`~vm\xae\xf2\x93WD\x04"
-        salt = hashlib.sha256(os_urandom_static).hexdigest().encode('ascii')
-        pwdhash = hashlib.pbkdf2_hmac('sha512', self.password.encode('utf-8'), salt, 100000)
-        pwdhash = binascii.hexlify(pwdhash)
-        return (salt + pwdhash).decode('ascii')
-
-    def verify_password(self, stored_password, provided_password):
-        """Verify a stored password against one provided by user"""
-        salt = stored_password[:64]
-        stored_password = stored_password[64:]
-        pwdhash = hashlib.pbkdf2_hmac('sha512', provided_password.encode('utf-8'),
-        salt.encode('ascii'), 100000)
-        pwdhash = binascii.hexlify(pwdhash).decode('ascii')
-        return pwdhash == stored_password
-    
-    def get_random_user_pasword(self):
-        random_user = ''.join(random.choice(string.ascii_lowercase)for i in range(3))
-        self.user = random_user
-        password_characters = string.ascii_letters #+ string.digits + string.punctuation
-        random_password = ''.join(random.choice(password_characters)for i in range(3))
-        self.password = random_password
-
-    def login_user(self):
-        db = get_db()
-        sql_statement = 'select id, name, email, password, is_active, is_admin from users where name=?'
-        cur = db.execute(sql_statement, [self.user])
-        user_record = cur.fetchone()
-
-        if user_record != None and self.verify_password(user_record['password'], self.password):
-            return user_record
-        else:
-            self.user = None
-            self.password = None
-            return None
-        
-    def get_user_info(self):
-        db = get_db()
-        sql_statement = 'select name, email, is_active, is_admin from users where name=?'
-        cur = db.execute(sql_statement, [self.user])
-        db_user = cur.fetchone()
-
-        if db_user == None:
-            self.is_valid = False
-            self.is_admin = False
-            self.email = ''
-        elif db_user['is_active'] != 1:
-            self.is_valid = False
-            self.is_admin = False
-            self.email = db_user['email']
-        else:
-            self.is_valid = True
-            self.is_admin = db_user['is_admin']
-            self.email = db_user['email']
+WORKING_DAYS = ["EM_O", "AP_O", "AM_O", "EM_C", "AP_C", "AM_C", "EM_P", "AP_P", "AM_P", "AP_W", "EM_W", "AM_W"]
 
 
+def read_schedule_sheet(sheet_name, usecols_list=None):
+    if usecols_list is None:
+        usecols_list = DEFAULT_SCHEDULE_COLS
+    for usecols in usecols_list:
+        try:
+            return pd.read_excel(SCHEDULE_FILE_PATH, sheet_name=sheet_name, usecols=usecols)
+        except ValueError:
+            continue
+    return pd.DataFrame()
 
-@app.route('/init_app')
-def init_app():
-    # check if there are users defined (at least one active admin required)
-    db = get_db()
-    sql_statement = 'select count(*) as cnt from users where is_active and is_admin;'
-    cur = db.execute(sql_statement)
-    active_admins = cur.fetchone()
+def take_schedule(selected_month=None):
+    if selected_month is None:
+        selected_month = datetime.today().strftime("%B")
 
-    if active_admins!=None and active_admins['cnt']>0:
-        print('Application is already set-up. Nothing to do..')
-        return redirect(url_for('initiatives'))
-    
-    # if not - create/update admin account with a new password and admin privileges, display
-    user_pass = UserPass()
-    user_pass.get_random_user_pasword()
-    sql_statement = '''insert into users(name, email, password, is_active, is_admin)
-                        values(?,?,?,True, True);'''
-    db.execute(sql_statement, [user_pass.user, 'noone@nowhere.no', user_pass.hash_password()])
-    db.commit()
-    print('User {} with password {} has been created'.format(user_pass.user, user_pass.password))
-    return redirect(url_for('initiatives'))
+    df = read_schedule_sheet(selected_month).fillna("N/A")
+    if df.empty:
+        df = pd.DataFrame(columns=["No data found or error reading sheet."])
+
+    df.columns = df.columns.map(str)
+    columns = df.columns.tolist()
+    data = df.to_dict(orient='records')
+
+    column_display_pairs = []
+    for col in columns:
+        try:
+            parsed = pd.to_datetime(col, errors='coerce')
+            if pd.notnull(parsed):
+                display = col[8:10] + "\n" + parsed.strftime("%a")
+            else:
+                display = col
+        except:
+            display = col
+        column_display_pairs.append((col, display))
+
+    return column_display_pairs, data
+
+def load_schedule_data(hub=None, selected_date=None):
+    if selected_date:
+        try:
+            date_obj = datetime.strptime(selected_date, '%Y-%m-%d')
+            today_str = date_obj.strftime("%Y-%m-%d 00:00:00")
+            current_month = date_obj.strftime("%B")
+        except ValueError:
+            today_str = datetime.today().strftime("%Y-%m-%d 00:00:00")
+            current_month = datetime.today().strftime("%B")
+    else:
+        today_str = datetime.today().strftime("%Y-%m-%d 00:00:00")
+        current_month = datetime.today().strftime("%B")
+    try:
+        df = pd.read_excel(SCHEDULE_FILE_PATH, sheet_name=current_month)
+    except Exception:
+        df = pd.DataFrame(columns=['Hub', today_str])
+
+    df.columns = df.columns.astype(str)
+    if hub and hub.lower() != "none":
+        df = df[df['Hub'] == hub]
+
+    shift_counts = df[today_str].value_counts().to_dict() if today_str in df.columns else {}
+    return df, shift_counts, today_str
+
+
 
 @app.route('/')
-def home():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid:
-        login.is_valid = False
-        login.is_admin = False
+def index():
+    selected_month = request.args.get('month')
+    column_display_pairs, data = take_schedule(selected_month)
+    current_month = selected_month or datetime.today().strftime("%B")
+    return render_template('index.html', column_display_pairs=column_display_pairs, data=data,
+                           selected_month=current_month, months=ALL_MONTHS)
 
-    db = get_db()
-    cur = db.execute('SELECT * FROM initiatives ORDER BY id DESC')
-    initiatives = cur.fetchall()
+@app.route('/legend')
+def legend():
+    return render_template('legend.html')
 
-    return render_template('initiatives.html', title="Initiatives", login=login, initiatives=initiatives)
+@app.route('/shift_stats')
+def shift_stats():
+    hub = request.args.get('hub')
+    if hub == "None":
+        hub = None
+    selected_date = request.args.get('date')
+    df, shift_counts, today_str = load_schedule_data(hub, selected_date)
+    selected_shift = request.args.get('shift')
+    agents = []
+    if selected_shift and today_str in df.columns:
+        agents = df[df[today_str] == selected_shift]['Agent Name'].tolist()
+    return render_template('shift_stats.html', shift_counts=shift_counts, hub=hub, agents=agents,
+                           selected_shift=selected_shift, selected_date=selected_date, shift_names=SHIFT_NAME_MAPPING)
 
-@app.route('/initiatives')
-def initiatives():
-    login = UserPass(session.get('user'))
-    if login.user:
-        login.get_user_info()
-    else:
-        login.is_valid = False
-        login.is_admin = False
+@app.route('/dayoff_show_summary')
+def dayoff_show_summary():
+    sheets = pd.read_excel(SCHEDULE_FILE_PATH, sheet_name=ALL_MONTHS)
+    yearly_summary = {}
+    for sheet_name in ALL_MONTHS:
+        df = sheets[sheet_name]
+        df["SL"] = df.iloc[:, 4:35].apply(lambda row: (row == "SL").sum(), axis=1)
+        df["VL"] = df.iloc[:, 4:35].apply(lambda row: (row == "VL").sum(), axis=1)
+        df["O"] = df.iloc[:, 4:35].apply(lambda row: (row == "O").sum(), axis=1)
+        df["DD"] = df.iloc[:, 4:35].apply(lambda row: (row == "DD").sum(), axis=1)
+        df["RB"] = df.iloc[:, 4:35].apply(lambda row: (row == "RB").sum(), axis=1)
 
-    db = get_db()
-    cur = db.execute('SELECT * FROM initiatives ORDER BY id DESC')
-    initiatives = cur.fetchall()
+        for _, row in df.iterrows():
+            agent = row["Agent Name"]
+            if agent not in yearly_summary:
+                yearly_summary[agent] = {"SL": 0, "VL": 0, "O": 0, "DD": 0, "RB": 0 }
+            yearly_summary[agent]["SL"] += row["SL"]
+            yearly_summary[agent]["VL"] += row["VL"]
+            yearly_summary[agent]["O"] += row["O"]
+            yearly_summary[agent]["DD"] += row["DD"]
+            yearly_summary[agent]["RB"] += row["RB"]
 
-    return render_template('initiatives.html', title="Initiatives", login=login, initiatives=initiatives)
+    summary_df = pd.DataFrame.from_dict(yearly_summary, orient='index').reset_index()
+    summary_df.columns = ["Agent Name", "SL", "VL", "O", "DD", "RB"]
+    return render_template("dayoff_show_summary.html", tables=[summary_df.to_html(classes='table table-striped', index=False)])
 
-@app.route('/new_initiative', methods=['GET', 'POST'])
-def new_initiative():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid:
-        return redirect(url_for('login'))
+@app.route('/general_stats')
+def general_stats():
+    return render_template('general_stats.html')
 
-    if request.method == 'POST':
-        db = get_db()
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        db.execute('''
-            INSERT INTO initiatives (
-                project_name, start_date, description, eta_date,
-                responsible, status_comment, status,
-                last_edited_by, last_edited_at, issue_code
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            [
-                request.form['project_name'],
-                request.form['start_date'],
-                request.form['description'],
-                request.form['eta_date'],
-                request.form['responsible'],
-                request.form['status_comment'],
-                request.form['status'],
-                login.user,
-                now,
-                request.form['issue_code']
-            ])
-        db.commit()
-        return redirect(url_for('initiatives'))
+@app.route('/time_cal')
+def time_cal():
+    return render_template('time_cal.html')
 
-    return render_template('new_initiative.html', login=login)
-
-@app.route('/edit_initiative/<int:initiative_id>', methods=['GET', 'POST'])
-def edit_initiative(initiative_id):
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid:
-        return redirect(url_for('login'))
-    
-    db = get_db()
-    cur = db.execute('SELECT * FROM initiatives WHERE id = ?', [initiative_id])
-    initiative = cur.fetchone()
-
-    if not (login.is_admin or initiative['last_edited_by'] == login.user):
-        flash("You don't have permission to edit this initiative.")
-        return redirect(url_for('initiatives'))
-
-    if request.method == 'POST':
-        print("ISSUE CODE:", request.form.get('issue_code'))
-        db.execute('''
-            UPDATE initiatives SET project_name=?, start_date=?, description=?, eta_date=?, responsible=?, status_comment=?, status=?, last_edited_by=?, last_edited_at=?, issue_code=?
-            WHERE id=?''',
-            [
-                request.form['project_name'], request.form['start_date'], request.form['description'],
-                request.form['eta_date'], request.form['responsible'], request.form['status_comment'],
-                request.form['status'], login.user, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                request.form['issue_code'], initiative_id
-            ])
-
-        db.commit()
-        return redirect(url_for('initiatives'))
-
-    return render_template('edit_initiative.html', initiative=initiative, login=login)
-
-@app.route('/delete_initiative/<int:initiative_id>', methods=['POST'])
-def delete_initiative(initiative_id):
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid or not login.is_admin:
-        return redirect(url_for('login'))
-
-    db = get_db()
-    db.execute('DELETE FROM initiatives WHERE id = ?', [initiative_id])
-    db.commit()
-    flash('Initiative deleted.')
-    return redirect(url_for('initiatives'))
+@app.route('/allocation')
+def allocation():
+    return render_template('allocation.html')
 
 @app.route('/about')
 def about():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
+    return render_template('about.html')
 
-    readme_content = ''
+@app.route('/bank_holidays')
+def bank_holidays():
+
+    df = pd.read_excel(SCHEDULE_FILE_PATH, sheet_name="BH")
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%d.%m.%Y')
+    df.fillna('', inplace=True)
+
+    holidays = df.to_dict(orient='records')
+
+    return render_template('bank_holidays.html', holidays=holidays)
+
+@app.route('/working_days')
+def working_days():
+    sheets = pd.read_excel(SCHEDULE_FILE_PATH, sheet_name=ALL_MONTHS)
+    
+    summary = {}
+
+    for month in ALL_MONTHS:
+        df = sheets[month]
+        if "Agent Name" not in df.columns or "Hub" not in df.columns:
+            continue
+
+        for _, row in df.iterrows():
+            agent = row["Agent Name"]
+            hub = row["Hub"]
+            if agent not in summary:
+                summary[agent] = {"Hub": hub, **{m: 0 for m in ALL_MONTHS}}
+            working_count = row.iloc[1:].isin(WORKING_DAYS).sum()
+            summary[agent][month] += working_count
+
+    summary_df = pd.DataFrame.from_dict(summary, orient="index").reset_index()
+    summary_df.rename(columns={"index": "Agent Name"}, inplace=True)
+
+    return render_template("working_days.html", table=summary_df)
+
+@app.route('/get_availability')
+def get_availability():
+    selected_date = request.args.get('date')
+    df, _, today_str = load_schedule_data(selected_date=selected_date)
+
+    phone_statuses = {"AM_P", "AP_P", "EM_P"}
+    chat_statuses = {"EM_C", "AP_C", "AM_C"}
+    offline_statuses = {"AM_O", "AP_O", "EM_O"}
+    weekender_statuses = {"AP_W", "EM_W", "AM_W"}
+    special_statuses = {"SP", "TR", "BA"}
+    unavailable_statuses = {"RD", "VL", "PH", "EL", "SL", "ML", "PL", "BD", "O", "OS", "DD"}
+
+    all_statuses = phone_statuses | chat_statuses | offline_statuses | special_statuses | unavailable_statuses | weekender_statuses
+
+    if today_str not in df.columns:
+        return jsonify({hub: {"phone": 0, "chat": 0, "offline": 0, "special": 0, "unavailable": 0} for hub in ["Warsaw", "Manila", "Mexico"]})
+
+    result = {}
+    for hub in ["Warsaw", "Mexico"]:
+        hub_df = df[df['Hub'].str.lower() == hub.lower()]
+        shifts = hub_df[today_str].fillna("").astype(str)
+        shifts = shifts[shifts.isin(all_statuses)]
+        special_mask = shifts.isin(special_statuses)
+
+        result[hub] = {
+            "phone": int((shifts[~special_mask].isin(phone_statuses)).sum()),
+            "chat": int((shifts[~special_mask].isin(chat_statuses)).sum()),
+            "offline": int((shifts[~special_mask].isin(offline_statuses)).sum()),
+            "special": int(special_mask.sum()),
+            "unavailable": int((shifts[~special_mask].isin(unavailable_statuses)).sum())
+        }
+
+    # Manila split with Weekenders
+    manila_df = df[df['Hub'].str.lower() == 'manila']
+    manila_shifts = manila_df[today_str].fillna("").astype(str)
+
+    region_counts = {
+        'EMEA': {'phone': 0, 'chat': 0, 'offline': 0, 'weekenders': 0},
+        'APAC': {'phone': 0, 'chat': 0, 'offline': 0, 'weekenders': 0},
+        'AMER': {'phone': 0, 'chat': 0, 'offline': 0, 'weekenders': 0},
+    }
+
+    manila_special = 0
+    manila_unavailable = 0
+
+    for shift in manila_shifts:
+        if shift in phone_statuses:
+            if shift == 'EM_P': region_counts['EMEA']['phone'] += 1
+            elif shift == 'AP_P': region_counts['APAC']['phone'] += 1
+            elif shift == 'AM_P': region_counts['AMER']['phone'] += 1
+        elif shift in chat_statuses:
+            if shift == 'EM_C': region_counts['EMEA']['chat'] += 1
+            elif shift == 'AP_C': region_counts['APAC']['chat'] += 1
+            elif shift == 'AM_C': region_counts['AMER']['chat'] += 1
+        elif shift in offline_statuses:
+            if shift == 'EM_O': region_counts['EMEA']['offline'] += 1
+            elif shift == 'AP_O': region_counts['APAC']['offline'] += 1
+            elif shift == 'AM_O': region_counts['AMER']['offline'] += 1
+        elif shift in weekender_statuses:
+            if shift == 'EM_W': region_counts['EMEA']['weekenders'] += 1
+            elif shift == 'AP_W': region_counts['APAC']['weekenders'] += 1
+            elif shift == 'AM_W': region_counts['AMER']['weekenders'] += 1
+        elif shift in special_statuses:
+            manila_special += 1
+        elif shift in unavailable_statuses:
+            manila_unavailable += 1
+
+    result['Manila'] = region_counts
+    result['ManilaSpecial'] = manila_special
+    result['ManilaUnavailable'] = manila_unavailable
+
+    selected_month = datetime.strptime(selected_date, "%Y-%m-%d").replace(day=1)
+    days_in_month = monthrange(selected_month.year, selected_month.month)[1]
+
+    df_clean = df.fillna("").astype(str).applymap(lambda x: x.strip())
+    count = df_clean.isin(WORKING_DAYS).sum().sum()
+    avg = count/days_in_month
+    round(avg, 2)
+
+    result['averageOnlineAgents'] = round(avg, 2)
+
+    return jsonify(result)
+
+@app.route('/manila_ho')
+def manila_ho():
     try:
-        with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
-            readme_content = f.read()
+        df = pd.read_excel(SCHEDULE_FILE_PATH, sheet_name='ManilaHO')
     except Exception as e:
-        readme_content = f"Couldn't load README.md: {e}"
-
-    return render_template('about.html', title="About", login=login, readme=readme_content)
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-
-    if request.method == 'GET':
-        return render_template('login.html', title="login", active_menu='login', login=login)
-    else:
-        user_name = '' if 'user_name' not in request.form else request.form['user_name']
-        user_pass = '' if 'user_pass' not in request.form else request.form['user_pass']
-
-        login = UserPass(user_name, user_pass)
-        login_record = login.login_user()
-
-        if login_record != None:
-            session['user'] = user_name
-            flash('Logon succesfull, welcome {}'.format(user_name))
-            return redirect(url_for('initiatives'))
-        else:
-            flash('Logon failed, try again')
-            return render_template('login.html', login=login)
-        
-@app.route('/logout')
-def logout():
-    if 'user' in session:
-        session.pop('user', None)
-        flash('You are logged out')
-    return redirect(url_for('initiatives'))
-
-@app.route('/users')
-def users():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid or not login.is_admin:
-        return redirect(url_for('login'))
-    db = get_db()
-    sql_command = 'select id, name, email, is_admin, is_active from users;'
-    cur = db.execute(sql_command)
-    users = cur.fetchall()
-
-    return render_template('users.html', title="Existing users", users=users, login=login) 
-
-@app.route('/user_status_change/<action>/<user_name>')
-def user_status_change(action, user_name):
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid or not login.is_admin:
-        return redirect(url_for('login'))
+        df = pd.DataFrame({'Error': [str(e)]})
     
-    db = get_db()
+    return render_template("manila_ho.html", table=df)
 
-    if action == 'active':
-        db.execute("""update users set is_active = (is_active + 1) % 2
-                    where name = ? and name <> ?""",
-                [user_name, login.user])
-        db.commit()
-    elif action == 'admin':
-        db.execute("""update users set is_admin = (is_admin + 1) % 2
-                    where name = ? and name <> ?""",
-                [user_name, login.user])
-        db.commit()
+@app.route('/download_schedule')
+def download_schedule():
+    selected_month = request.args.get('month') or datetime.today().strftime("%B")
+    df = read_schedule_sheet(selected_month, usecols_list=DEFAULT_DOWNLOAD_COLS)
 
-    return redirect(url_for('users'))
-
-@app.route('/edit_user/<user_name>', methods=['GET', 'POST'])
-def edit_user(user_name):
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid or not login.is_admin:
-        return redirect(url_for('login'))
-
-    db = get_db()
-    cur = db.execute('select name, email from users where name = ?', [user_name])
-    user = cur.fetchone()
-    message = None
-
-    if user == None:
-        flash('No such user')
-        return redirect(url_for('users'))
-
-    if request.method == 'GET':
-        return render_template('edit_user.html', title="Edit users", user=user, login=login )
-    else:
-        new_email = '' if 'email' not in request.form else request.form["email"]
-        new_password = '' if 'user_pass' not in request.form else request.form['user_pass']
-        if new_email != user['email']:
-            sql_statement = "update users set email = ? where name = ?"
-            db.execute(sql_statement, [new_email, user_name])
-            db.commit()
-            flash('Email was changed')
-        if new_password != '':
-            user_pass = UserPass(user_name, new_password)
-            sql_statement = "update users set password = ? where name = ?"
-            db.execute(sql_statement, [user_pass.hash_password(), user_name])
-            db.commit()
-            flash('Password was changed')
-        return redirect(url_for('users'))
-
-@app.route('/user_delete/<user_name>')
-def delete_user(user_name):
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid or not login.is_admin:
-        return redirect(url_for('login'))
-    
-    db = get_db()
-    sql_statement = 'delete from users where name = ? and name <> ?'
-    db.execute(sql_statement, [user_name, login.user])
-    db.commit()
-
-    return redirect(url_for('users'))
-
-@app.route('/new_user', methods=['GET', 'POST'])
-def new_user():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-    if not login.is_valid or not login.is_admin:
-        return redirect(url_for('login'))
-
-    db = get_db()
-    message = None
-    user = {}
-
-    if request.method == 'GET':
-        return render_template('new_user.html', user=user, login=login)
-    else:
-        user['user_name'] = '' if not 'user_name' in request.form else request.form['user_name']
-        user['email'] = '' if not 'email' in request.form else request.form['email']
-        user['user_pass'] = '' if not 'user_pass' in request.form else request.form['user_pass']
-
-        cursor = db.execute('select count(*) as cnt from users where name = ?', [user['user_name']])
-        record = cursor.fetchone()
-        is_user_name_unique = (record['cnt'] == 0)
-
-        cursor = db.execute('select count(*) as cnt from users where email = ?', [user['email']])
-        record = cursor.fetchone()
-        is_user_email_unique = (record['cnt'] == 0)
-
-        if user['user_name'] == '':
-            message = 'Name cannot be empty'
-        elif user['email'] == '':
-            message = 'Email cannot be empty'
-        elif user['user_pass'] == '':
-            message = 'Password cannot be empty'
-        elif not is_user_name_unique:
-            message = 'User with the name {} already exists'.format(user['user_name'])
-        elif not is_user_email_unique:
-            message = 'User with the email {} already exists'.format(user['email'])
-
-        if not message:
-            user_pass = UserPass(user['user_name'], user['user_pass'])
-            password_hash = user_pass.hash_password()
-            sql_statement = '''insert into users(name, email, password, is_active, is_admin)
-                            values(?,?,?, True, False);'''
-            db.execute(sql_statement, [user['user_name'], user['email'], password_hash])
-            db.commit()
-            flash('User {} created'.format(user['user_name']))
-            return redirect(url_for('users'))
-        else:
-            flash('Correct error: {}'.format(message))
-            return render_template('new_user.html', active_menu='users', user=user, login=login)
-        
-@app.route('/export_initiatives')
-def export_initiatives():
-    login = UserPass(session.get('user'))
-    login.get_user_info()
-
-    if not login.is_valid:
-        return redirect(url_for('login'))
-
-    db = get_db()
-    cur = db.execute('SELECT * FROM initiatives ORDER BY id DESC')
-    initiatives = cur.fetchall()
-
-    df = pd.DataFrame([dict(row) for row in initiatives])
-    
-    output = BytesIO()
-    csv_data = df.to_csv(index=False, sep=';', encoding='utf-8-sig')
-    output.write(csv_data.encode('utf-8-sig'))
+    output = io.StringIO()
+    df.to_csv(output, index=False, sep=';')
     output.seek(0)
 
-    now = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"initiatives_{now}.csv"
-
     return send_file(
-        output,
+        io.BytesIO(output.getvalue().encode('utf-8')),
+        mimetype='text/csv',
         as_attachment=True,
-        download_name=filename,
-        mimetype='text/csv'
+        download_name=f'schedule_{selected_month}.csv'
     )
 
 
-if __name__ == '__main__':
+# Skiprows'24' removes Other row, some people put values there
+# Warnings module for issues with data validation in excel
+
+def highlight_cells(val):
+    if pd.isna(val):
+        return 'color: red; font-weight: bold;'
+    elif val == 1:
+        return 'color: darkorange; font-weight: bold'
+    elif val == 2:
+        return 'color: orange; font-weight: bold;'
+    elif val == 3:
+        return 'color: gold; font-weight: bold;'
+    elif val == 4:
+        return 'color: green; font-weight: bold;'
+    else:
+        return ''
+
+@app.route('/skill_matrix_waw')
+def skill_matrix_waw():
+    warnings.filterwarnings(action="ignore", category=UserWarning)
+    df = pd.read_excel(SKILL_MATRIX_PATH, sheet_name=1, skiprows=[24])
+    styled_df = df.style.format(precision=0, na_rep="N/A").map(highlight_cells)
+    table_html = styled_df.hide().to_html()
+
+    return render_template("skill_matrix_waw.html", table_html=table_html)
+
+@app.route('/skill_matrix_mnl')
+def skill_matrix_mnl():
+    warnings.filterwarnings(action="ignore", category=UserWarning)
+    df = pd.read_excel(SKILL_MATRIX_PATH, sheet_name=2, skiprows=[24])
+    styled_df = df.style.format(precision=0, na_rep="N/A").map(highlight_cells)
+    table_html = styled_df.hide().to_html()
+    
+    return render_template("skill_matrix_mnl.html", table_html=table_html)
+
+
+@app.route('/skill_matrix_mx')
+def skill_matrix_mx():
+    warnings.filterwarnings(action="ignore", category=UserWarning)
+    df = pd.read_excel(SKILL_MATRIX_PATH, sheet_name=3, skiprows=[24])
+    styled_df = df.style.format(precision=0, na_rep="N/A").map(highlight_cells)
+    table_html = styled_df.hide().to_html()
+    
+    return render_template("skill_matrix_mx.html", table_html=table_html)
+
+if __name__ == "__main__":
     app.run(debug=True)

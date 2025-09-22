@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block body_content %}
+
+<style>
+    .table-wrapper {
+        max-height: calc(100vh - 350px);
+        overflow: auto;
+        border-radius: 8px;
+        border: 1px solid #dee2e6;
+    }
+
+    table {
+        border-collapse: separate;
+        border-spacing: 0;
+        width: 100%;
+    }
+
+    th, td {
+        white-space: nowrap;
+        text-align: center;
+        vertical-align: middle;
+    }
+
+    thead tr:nth-child(1) th {
+        position: sticky;
+        top: 0;
+        background: #e9f3ff;
+        z-index: 3;
+    }
+
+    thead tr:nth-child(2) th {
+        position: sticky;
+        top: 38px;
+        background: #ffffff;
+        z-index: 2;
+    }
+
+    thead input {
+        width: 100%;
+        padding: 4px;
+        box-sizing: border-box;
+        font-size: 14px;
+    }
+
+    .table-wrapper::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+    }
+
+    .table-wrapper::-webkit-scrollbar-thumb {
+        background-color: #c2c2c2;
+        border-radius: 6px;
+    }
+
+    .table-wrapper::-webkit-scrollbar-track {
+        background-color: #f1f1f1;
+    }
+</style>
+
+<div class="container mt-4 mb-5">
+    <h2 class="mb-4">📅 Public Holidays 2025 – Poland, Mexico, Philippines</h2>
+
+    <div class="table-wrapper">
+        <table class="table table-bordered table-striped table-hover mb-0">
+            <thead class="table-primary">
+                <tr>
+                    <th>Date</th>
+                    <th>Country</th>
+                    <th>Holiday Name</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <th><input type="text" class="form-control column-search" data-col="0" placeholder="Search Date"></th>
+                    <th><input type="text" class="form-control column-search" data-col="1" placeholder="Search Country"></th>
+                    <th><input type="text" class="form-control column-search" data-col="2" placeholder="Search Holiday"></th>
+                    <th><input type="text" class="form-control column-search" data-col="3" placeholder="Search Description"></th>
+                </tr>
+            </thead>
+            <tbody id="dataTableBody">
+                {% for row in holidays %}
+                    <tr>
+                        <td>{{ row['Date'] }}</td>
+                        <td>{{ row['Country'] }}</td>
+                        <td>{{ row['Holiday Name'] }}</td>
+                        <td>{{ row['Description'] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    // Simple JS column filtering
+    document.querySelectorAll(".column-search").forEach(input => {
+        input.addEventListener("input", () => {
+            const filters = Array.from(document.querySelectorAll(".column-search")).map(i => i.value.toLowerCase());
+            const rows = document.querySelectorAll("#dataTableBody tr");
+
+            rows.forEach(row => {
+                const cells = row.querySelectorAll("td");
+                let show = true;
+
+                filters.forEach((filter, index) => {
+                    if (filter && !cells[index].textContent.toLowerCase().includes(filter)) {
+                        show = false;
+                    }
+                });
+
+                row.style.display = show ? "" : "none";
+            });
+        });
+    });
+</script>
+
+{% endblock %}
